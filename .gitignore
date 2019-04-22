@@ -1,0 +1,7 @@
+/experiments/
+/__pycache__/
+/data/
+/processed/
+/raw/
+.ipynb_checkpoints/
+/models/__pycache__/

@@ -1,7 +1,12 @@
 /experiments/
+!/experiments/plots/
 /__pycache__/
 /data/
 /processed/
 /raw/
 .ipynb_checkpoints/
-/models/__pycache__/
+**/.ipynb_checkpoints/
+**/__pycache__/
+/result_csvs/
+/report_plots/
+/samples/

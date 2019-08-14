@@ -6,24 +6,7 @@ from torch.nn.functional import softplus
 import numpy as np
 
 from .BaseModel import BaseModel
-
-def make_fake_unpool_indices(shape):
-    a,b,c,d = shape
-    arr = np.ones(c*d*2)
-    arr = ((arr.cumsum() - 1 )*2).reshape((c*2,d))[::2]
-    return torch.LongTensor(np.tile(arr,(a,b,1,1))).cuda()
-    
-def calc_size_after_conv(s, kernel, stride=1, padding=0):
-    h_in, w_in = s
-    h_out = int((h_in+2*padding-kernel)/stride +1)
-    w_out = int((w_in+2*padding-kernel)/stride +1)
-    return (h_out, w_out)
-    
-def calc_size_after_mp(s, kernel, stride=1, padding=0, dilation=1):
-    h_in, w_in = s
-    h_out = int( ((h_in + 2 * padding - dilation * (kernel - 1)) / stride) + 1 )
-    w_out = int( ((w_in + 2 * padding - dilation * (kernel - 1)) / stride) + 1 )
-    return (h_out, w_out)
+from .modelUtils import calc_size_after_mp, calc_size_after_conv
     
 class Encoder(BaseModel):
     def __init__(self, imgSize, hidden_features, latent_features, in_channels):
@@ -124,6 +107,7 @@ class VariationalAutoEncoderNoUnpool(BaseModel):
         self.hidden_features=hidden_features
         self.latent_features = latent_features
         self.num_samples=num_samples
+        self.in_channels = in_channels
 
         # We encode the data onto the latent space using two linear layers
         self.encoder = Encoder(imgSize, hidden_features, self.latent_features*2, in_channels=in_channels)#*2 to account for split in mean and variance
@@ -131,14 +115,40 @@ class VariationalAutoEncoderNoUnpool(BaseModel):
         # The latent code must be decoded into the original image
         self.decoder = Decoder(self.pre_flatten_size, hidden_features, self.latent_features, self.num_samples, out_channels=in_channels)
         
-
-    def forward(self, x): 
-        orig_shape = x.shape
-        #x = x.view((x.shape[0],-1))
-        outputs = {'x':x}
+    def plot_preprocess(self, outputs, batch, results, batchSize, cuda):
+        num_samples = self.num_samples
+        latent_variables = outputs['mu'].shape[1]
         
-        # Split encoder outputs into a mean and variance vector
-        z, mp_indices_sizes = self.encoder(x)
+        x, y, _id = batch
+        y = np.array(y)
+        
+        x_hat = outputs['x_hat']
+        z = outputs['z']
+        decoder_z = outputs['decoder_z'].view((batchSize,num_samples,latent_variables))
+        decoder_z = decoder_z.cpu().detach().numpy().reshape(-1, latent_variables)
+        y = y.reshape((batchSize, 1, 1, 1))
+        y = np.repeat(y, num_samples, axis=1)
+        y = y.squeeze().flatten()
+        
+
+        if results is not None:
+            z_train, y_train, z_valid, y_valid = results
+            z_plot = z_valid
+            y_plot = np.array(y_valid)
+        else:
+            z_plot = decoder_z#z.cpu().detach().numpy()
+            y_plot = y
+
+        classes = np.unique(y_plot)
+        if cuda:
+            x = x.cpu().detach()
+            x_hat = x_hat.cpu().detach()
+            z = z.cpu().detach()
+
+        z = z.reshape((batchSize,-1))
+        return x, x_hat, z_plot, y_plot, classes
+        
+    def take_samples(self, z, batch_size):
         mu, log_var = torch.chunk(z, 2, dim=-1)
         
         # Make sure that the log variance is positive
@@ -150,7 +160,6 @@ class VariationalAutoEncoderNoUnpool(BaseModel):
                 
         # Don't propagate gradients through randomness
         with torch.no_grad():
-            batch_size = mu.size(0)
             epsilon = torch.randn(batch_size, self.num_samples, self.latent_features)
             
             if self._cuda:
@@ -163,19 +172,29 @@ class VariationalAutoEncoderNoUnpool(BaseModel):
         
         z = mu.unsqueeze(1) + epsilon * sigma.unsqueeze(1)  
         
-        a,b,c = z.size()
-        # Run through decoder
+        # Get ready to run through decoder
+        decoder_z = z.view(batch_size*self.num_samples, self.latent_features)
+        _ = ''
+        return decoder_z, log_var, mu, _, _, _, _
+    
+    def forward(self, x): 
+        batch_size = x.size(0)
+        outputs = {'x':x}
         
-        z = z.view(batch_size*self.num_samples, c)
-        x = self.decoder(z, mp_indices_sizes, batch_size)
-        a,b,c,d = x.size()
-        x = x.view(batch_size, self.num_samples, b, c, d)
+        # Split encoder outputs into a mean and variance vector
+        z, mp_indices_sizes = self.encoder(x)
+        decoder_z, log_var, mu, _, _, _, _ = self.take_samples(z, batch_size)
+        
+        x = self.decoder(decoder_z, mp_indices_sizes, batch_size)
+        x = x.view(batch_size, self.num_samples, self.in_channels, self.imgSize[0], self.imgSize[1])
         # The original digits are on the scale [0, 1]
         x = torch.sigmoid(x)
         # Mean over samples
         x_hat = torch.mean(x, dim=1)
-        #x_hat = x.view(orig_shape)
         
+        
+        outputs['decoder_z'] = decoder_z
+        outputs["x_hat_all"] = x
         outputs["x_hat"] = x_hat
         outputs["z"] = mu
         outputs["mu"] = mu
